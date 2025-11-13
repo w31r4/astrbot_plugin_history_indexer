@@ -12,6 +12,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from thefuzz import fuzz
 
 if TYPE_CHECKING:
     from astrbot.core.star.register.star_handler import RegisteringCommandable
@@ -106,38 +107,47 @@ class HistorySearchService:
         senders: Sequence[str] | None = None,
         limit: int = 20,
         include_outline: bool = True,
+        fuzzy_threshold: int = 70,
     ) -> list[HistoryRecord]:
         """
-        通用的多维度消息检索接口。
+        通用的多维度消息检索接口，支持模糊匹配。
 
         Args:
-            keyword: 用于在消息文本和摘要中搜索的关键词。如果为空，则不进行关键词过滤。
+            keyword: 用于在消息文本和摘要中搜索的关键词。
             sessions: 限定在一个或多个会话 ID 范围内进行搜索。
             platforms: 限定在一个或多个平台 ID 范围内进行搜索。
             senders: 限定在一个或多个发送者 ID 范围内进行搜索。
             limit: 返回结果的最大数量，限制在 1 到 200 之间。
             include_outline: 是否同时搜索消息的摘要字段 (`message_outline`)。
+            fuzzy_threshold: 模糊匹配的相似度阈值 (0-100)。只有得分高于此阈值的记录才会被返回。
 
         Returns:
-            一个 `HistoryRecord` 对象列表，按时间倒序排列。
+            一个 `HistoryRecord` 对象列表，按相似度得分和时间倒序排列。
         """
-        keyword = keyword or ""
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return []
+
         limit = max(1, min(200, limit))
         norm_sessions = self._normalize_collection(sessions)
         norm_platforms = self._normalize_collection(platforms)
         norm_senders = self._normalize_collection(senders)
 
-        def _query():
+        def _query_and_filter():
+            # 步骤 1: 从数据库中获取候选记录
+            # 为了性能，我们先用简单的 LIKE 查询缩小范围，获取最近的 200 条记录作为候选池。
             clauses: list[str] = []
             params: list[Any] = []
-            if keyword:
-                pattern = f"%{keyword}%"
-                if include_outline:
-                    clauses.append("(message_text LIKE ? OR message_outline LIKE ?)")
-                    params.extend([pattern, pattern])
-                else:
-                    clauses.append("message_text LIKE ?")
-                    params.append(pattern)
+
+            # 使用简单的模式匹配来初步筛选
+            simple_pattern = f"%{keyword[0]}%" if keyword else "%"
+            if include_outline:
+                clauses.append("(message_text LIKE ? OR message_outline LIKE ?)")
+                params.extend([simple_pattern, simple_pattern])
+            else:
+                clauses.append("message_text LIKE ?")
+                params.append(simple_pattern)
+
             if norm_sessions:
                 placeholders = ",".join("?" for _ in norm_sessions)
                 clauses.append(f"session_id IN ({placeholders})")
@@ -158,14 +168,33 @@ class HistorySearchService:
             )
             if clauses:
                 query += " WHERE " + " AND ".join(clauses)
-            query += " ORDER BY created_at DESC LIMIT ?"
-            params.append(limit)
+            # 获取比最终 limit 更多的候选记录
+            query += " ORDER BY created_at DESC LIMIT 200"
 
+            candidate_records: list[HistoryRecord]
             with self._get_conn() as conn:
                 cursor = conn.execute(query, params)
-                return [self._row_to_record(row) for row in cursor.fetchall()]
+                candidate_records = [self._row_to_record(row) for row in cursor.fetchall()]
 
-        records = await asyncio.to_thread(_query)
+            # 步骤 2: 在内存中进行模糊匹配评分和筛选
+            scored_records = []
+            for record in candidate_records:
+                text_to_match = record.message_text
+                score = fuzz.partial_ratio(keyword, text_to_match)
+                if include_outline and record.message_outline:
+                    outline_score = fuzz.partial_ratio(keyword, record.message_outline)
+                    score = max(score, outline_score)
+
+                if score >= fuzzy_threshold:
+                    scored_records.append({"record": record, "score": score})
+
+            # 步骤 3: 按分数和时间排序
+            scored_records.sort(key=lambda x: (x["score"], x["record"].created_at), reverse=True)
+
+            # 返回最终结果
+            return [item["record"] for item in scored_records[:limit]]
+
+        records = await asyncio.to_thread(_query_and_filter)
         return records
 
     async def search_by_session(
@@ -173,27 +202,30 @@ class HistorySearchService:
         session_id: str,
         keyword: str,
         limit: int = 20,
+        fuzzy_threshold: int = 70,
     ) -> list[HistoryRecord]:
         """按单个会话 ID 检索消息。"""
-        return await self.search(keyword, sessions=[session_id], limit=limit)
+        return await self.search(keyword, sessions=[session_id], limit=limit, fuzzy_threshold=fuzzy_threshold)
 
     async def search_by_platform(
         self,
         platform_ids: Sequence[str],
         keyword: str,
         limit: int = 20,
+        fuzzy_threshold: int = 70,
     ) -> list[HistoryRecord]:
         """按一个或多个平台 ID 检索消息。"""
-        return await self.search(keyword, platforms=platform_ids, limit=limit)
+        return await self.search(keyword, platforms=platform_ids, limit=limit, fuzzy_threshold=fuzzy_threshold)
 
     async def search_across_sessions(
         self,
         session_ids: Sequence[str],
         keyword: str,
         limit: int = 20,
+        fuzzy_threshold: int = 70,
     ) -> list[HistoryRecord]:
         """跨多个指定会话 ID 进行检索。"""
-        return await self.search(keyword, sessions=session_ids, limit=limit)
+        return await self.search(keyword, sessions=session_ids, limit=limit, fuzzy_threshold=fuzzy_threshold)
 
     async def search_by_sender(
         self,
@@ -202,6 +234,7 @@ class HistorySearchService:
         *,
         platform_id: str | None = None,
         limit: int = 20,
+        fuzzy_threshold: int = 70,
     ) -> list[HistoryRecord]:
         """
         按发送者 ID 检索消息。
@@ -211,6 +244,7 @@ class HistorySearchService:
             keyword: 搜索关键词。
             platform_id: (可选) 限定在特定平台内搜索。
             limit: 返回结果数量。
+            fuzzy_threshold: 模糊匹配阈值。
 
         Returns:
             匹配的历史记录列表。
@@ -221,11 +255,12 @@ class HistorySearchService:
             senders=[sender_id],
             platforms=platforms,
             limit=limit,
+            fuzzy_threshold=fuzzy_threshold,
         )
 
-    async def search_global(self, keyword: str, limit: int = 20) -> list[HistoryRecord]:
+    async def search_global(self, keyword: str, limit: int = 20, fuzzy_threshold: int = 70) -> list[HistoryRecord]:
         """进行全局检索，不受任何会话、平台或发送者限制。"""
-        return await self.search(keyword, limit=limit)
+        return await self.search(keyword, limit=limit, fuzzy_threshold=fuzzy_threshold)
 
 
 _HISTORY_SERVICE: HistorySearchService | None = None

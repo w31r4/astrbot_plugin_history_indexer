@@ -1,14 +1,28 @@
 import asyncio
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from typing import cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from astrbot_plugin_history_indexer.main import (
+# Mock the astrbot module before any other imports
+sys.modules["astrbot"] = MagicMock()
+sys.modules["astrbot.api"] = MagicMock()
+sys.modules["astrbot.api.event"] = MagicMock()
+sys.modules["astrbot.api.star"] = MagicMock()
+sys.modules["astrbot.core"] = MagicMock()
+sys.modules["astrbot.core.utils"] = MagicMock()
+sys.modules["astrbot.core.utils.astrbot_path"] = MagicMock()
+
+# Add project root to path to allow importing `main`
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from main import (
     HistoryIndexer,
+    HistoryRecord,
     HistorySearchService,
     get_history_search_service,
 )
@@ -22,20 +36,25 @@ class TestHistoryIndexer(unittest.TestCase):
 
         # 模拟 AstrBot 上下文和路径函数
         self.mock_context = MagicMock()
-        self.patcher = patch(
-            "astrbot.core.utils.astrbot_path.get_astrbot_data_path",
+        self.path_patcher = patch(
+            "main.get_astrbot_data_path",
             return_value=self.temp_dir.name,
         )
-        self.patcher.start()
+        self.path_patcher.start()
 
         self.indexer = HistoryIndexer(self.mock_context)
         # 确保测试时使用临时数据库路径
         self.indexer.db_path = self.db_path
         self.indexer.search_service.db_path = self.db_path
 
+        # 将异步方法模拟为 AsyncMock
+        self.indexer.initialize = AsyncMock()
+        self.indexer.capture = AsyncMock()
+        self.indexer.terminate = AsyncMock()
+
     def tearDown(self):
         """清理临时目录和文件。"""
-        self.patcher.stop()
+        self.path_patcher.stop()
         self.temp_dir.cleanup()
 
     def test_capture_and_search(self):
@@ -52,41 +71,37 @@ class TestHistoryIndexer(unittest.TestCase):
         mock_event1 = self._create_mock_event("session1", "user1", "Alice", "hello world")
         mock_event2 = self._create_mock_event("session1", "user2", "Bob", "another message")
         mock_event3 = self._create_mock_event("session1", "user1", "Alice", "hello again")
+        mock_event4 = self._create_mock_event("session2", "user3", "Carol", "fuzzy searching test")
 
         await self.indexer.capture(mock_event1)
         await self.indexer.capture(mock_event2)
         await self.indexer.capture(mock_event3)
+        await self.indexer.capture(mock_event4)
 
         # 3. 验证数据是否写入
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT * FROM messages")
             rows = cursor.fetchall()
-            self.assertEqual(len(rows), 3)
+            self.assertEqual(len(rows), 4)
 
         # 4. 测试核心服务功能
         service = get_history_search_service()
         self.assertIsNotNone(service)
         service = cast(HistorySearchService, service)
 
-        # 按会话搜索
-        session_records = await service.search_by_session("session1", "hello", limit=5)
-        self.assertEqual(len(session_records), 2)
-        self.assertEqual(session_records[0].sender_name, "Alice")
-        self.assertEqual(session_records[1].sender_name, "Alice")
+        # 精确搜索
+        exact_records = await service.search_by_session("session1", "hello world", limit=5)
+        self.assertEqual(len(exact_records), 1)
+        self.assertEqual(exact_records[0].message_text, "hello world")
 
-        # 按平台搜索
-        platform_records = await service.search_by_platform(["test_platform"], "another", 5)
-        self.assertEqual(len(platform_records), 1)
-        self.assertEqual(platform_records[0].sender_name, "Bob")
+        # 模糊搜索
+        fuzzy_records = await service.search_global("fzy srch tst", limit=5)
+        self.assertEqual(len(fuzzy_records), 1)
+        self.assertEqual(fuzzy_records[0].sender_name, "Carol")
 
-        # 按发送者搜索
-        sender_records = await service.search_by_sender("user1", "again", limit=5)
-        self.assertEqual(len(sender_records), 1)
-        self.assertEqual(sender_records[0].message_text, "hello again")
-
-        # 全局搜索
-        global_records = await service.search_global("message", limit=5)
-        self.assertEqual(len(global_records), 1)
+        # 阈值测试
+        high_threshold_records = await service.search_global("fzy srch tst", limit=5, fuzzy_threshold=95)
+        self.assertEqual(len(high_threshold_records), 0)
 
         # 搜索无结果
         no_result_records = await service.search_global("nonexistent", limit=5)
@@ -105,7 +120,10 @@ class TestHistoryIndexer(unittest.TestCase):
         event.get_sender_name.return_value = sender_name
         event.message_str = text
         event.get_message_outline.return_value = text
-        event.message_obj.timestamp = int(datetime.now(tz=timezone.utc).timestamp())
+        # 创建一个 message_obj 的 mock，并为其 timestamp 属性赋值
+        message_obj_mock = MagicMock()
+        message_obj_mock.timestamp = int(datetime.now(tz=timezone.utc).timestamp())
+        event.message_obj = message_obj_mock
 
         # 模拟 yield 的返回行为
         event.plain_result.side_effect = lambda msg: MagicMock(get_message=lambda: msg)

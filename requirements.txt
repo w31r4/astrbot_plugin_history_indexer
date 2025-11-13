@@ -1,1 +1,2 @@
-# 本插件仅使用标准库与 AstrBot 运行时，无需额外第三方依赖。
+thefuzz
+python-Levenshtein
