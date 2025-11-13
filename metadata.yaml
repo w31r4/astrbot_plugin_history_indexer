@@ -1,6 +1,6 @@
 name: astrbot_plugin_history_indexer
 display_name: 历史消息索引器
-desc: 监听所有会话并将消息写入本地 SQLite，供其他插件快速检索
-version: v0.1.0
+desc: 一个静默的后台服务，负责索引所有消息并为其他插件提供检索接口。无任何聊天命令。
+version: v0.2.0
 author: ZenFun
 repo: https://github.com/w31r4/astrbot_plugin_history_indexer

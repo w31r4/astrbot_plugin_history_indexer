@@ -49,15 +49,9 @@ class TestHistoryIndexer(unittest.TestCase):
         self.assertTrue(os.path.exists(self.db_path))
 
         # 2. 模拟消息事件并捕获
-        mock_event1 = self._create_mock_event(
-            "session1", "user1", "Alice", "hello world"
-        )
-        mock_event2 = self._create_mock_event(
-            "session1", "user2", "Bob", "another message"
-        )
-        mock_event3 = self._create_mock_event(
-            "session1", "user1", "Alice", "hello again"
-        )
+        mock_event1 = self._create_mock_event("session1", "user1", "Alice", "hello world")
+        mock_event2 = self._create_mock_event("session1", "user2", "Bob", "another message")
+        mock_event3 = self._create_mock_event("session1", "user1", "Alice", "hello again")
 
         await self.indexer.capture(mock_event1)
         await self.indexer.capture(mock_event2)
@@ -69,107 +63,40 @@ class TestHistoryIndexer(unittest.TestCase):
             rows = cursor.fetchall()
             self.assertEqual(len(rows), 3)
 
-        # 4. 测试搜索功能
-        # 模拟搜索事件
-        mock_search_event = self._create_mock_event("session1", "user3", "Charlie", "")
-
-        # 搜索 "hello"
-        results_hello = []
-        async for result in self.indexer.hist_search(
-            mock_search_event, keyword="hello", limit=5
-        ):
-            results_hello.append(result.get_message())
-
-        self.assertEqual(len(results_hello), 1)
-        self.assertIn("2 条匹配", results_hello[0])
-        self.assertIn("Alice: hello world", results_hello[0])
-        self.assertIn("Alice: hello again", results_hello[0])
-
-        # 搜索 "another"
-        results_another = []
-        async for result in self.indexer.hist_search(
-            mock_search_event, keyword="another", limit=5
-        ):
-            results_another.append(result.get_message())
-
-        self.assertEqual(len(results_another), 1)
-        self.assertIn("1 条匹配", results_another[0])
-        self.assertIn("Bob: another message", results_another[0])
-
-        # 搜索不存在的关键词
-        results_none = []
-        async for result in self.indexer.hist_search(
-            mock_search_event, keyword="nonexistent", limit=5
-        ):
-            results_none.append(result.get_message())
-
-        self.assertEqual(len(results_none), 1)
-        self.assertIn("未找到匹配的记录", results_none[0])
-
-        # 6. 通用服务接口
+        # 4. 测试核心服务功能
         service = get_history_search_service()
         self.assertIsNotNone(service)
         service = cast(HistorySearchService, service)
+
+        # 按会话搜索
         session_records = await service.search_by_session("session1", "hello", limit=5)
         self.assertEqual(len(session_records), 2)
-        platform_records = await service.search_by_platform(
-            ["test_platform"], "hello", 5
-        )
-        self.assertEqual(len(platform_records), 2)
-        sender_records = await service.search_by_sender("user2", "another", limit=5)
+        self.assertEqual(session_records[0].sender_name, "Alice")
+        self.assertEqual(session_records[1].sender_name, "Alice")
+
+        # 按平台搜索
+        platform_records = await service.search_by_platform(["test_platform"], "another", 5)
+        self.assertEqual(len(platform_records), 1)
+        self.assertEqual(platform_records[0].sender_name, "Bob")
+
+        # 按发送者搜索
+        sender_records = await service.search_by_sender("user1", "again", limit=5)
         self.assertEqual(len(sender_records), 1)
+        self.assertEqual(sender_records[0].message_text, "hello again")
 
-        # 7. 新增检索指令
-        platform_msgs = []
-        async for result in self.indexer.hist_platform(
-            mock_search_event,
-            platform="test_platform",
-            keyword="hello",
-            limit=5,
-        ):
-            platform_msgs.append(result.get_message())
-        self.assertTrue(platform_msgs)
-        self.assertIn("平台 test_platform", platform_msgs[0])
+        # 全局搜索
+        global_records = await service.search_global("message", limit=5)
+        self.assertEqual(len(global_records), 1)
 
-        session_msgs = []
-        async for result in self.indexer.hist_session(
-            mock_search_event,
-            session="session1",
-            keyword="hello",
-            limit=5,
-        ):
-            session_msgs.append(result.get_message())
-        self.assertTrue(session_msgs)
-        self.assertIn("会话 session1", session_msgs[0])
-
-        global_msgs = []
-        async for result in self.indexer.hist_global(
-            mock_search_event,
-            keyword="world",
-            limit=5,
-        ):
-            global_msgs.append(result.get_message())
-        self.assertTrue(global_msgs)
-        self.assertIn("全局最近", global_msgs[0])
-
-        sender_msgs = []
-        async for result in self.indexer.hist_sender(
-            mock_search_event,
-            sender="user1",
-            keyword="hello",
-            limit=5,
-        ):
-            sender_msgs.append(result.get_message())
-        self.assertTrue(sender_msgs)
-        self.assertIn("user1", sender_msgs[0])
+        # 搜索无结果
+        no_result_records = await service.search_global("nonexistent", limit=5)
+        self.assertEqual(len(no_result_records), 0)
 
         # 5. 终止
         await self.indexer.terminate()
         self.assertFalse(self.indexer._initialized)
 
-    def _create_mock_event(
-        self, session_id: str, sender_id: str, sender_name: str, text: str
-    ) -> MagicMock:
+    def _create_mock_event(self, session_id: str, sender_id: str, sender_name: str, text: str) -> MagicMock:
         """创建一个模拟的 AstrMessageEvent。"""
         event = MagicMock()
         event.unified_msg_origin = session_id
