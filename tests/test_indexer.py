@@ -4,9 +4,14 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from typing import cast
 from unittest.mock import MagicMock, patch
 
-from astrbot_plugin_history_indexer.main import HistoryIndexer
+from astrbot_plugin_history_indexer.main import (
+    HistoryIndexer,
+    HistorySearchService,
+    get_history_search_service,
+)
 
 
 class TestHistoryIndexer(unittest.TestCase):
@@ -26,6 +31,7 @@ class TestHistoryIndexer(unittest.TestCase):
         self.indexer = HistoryIndexer(self.mock_context)
         # 确保测试时使用临时数据库路径
         self.indexer.db_path = self.db_path
+        self.indexer.search_service.db_path = self.db_path
 
     def tearDown(self):
         """清理临时目录和文件。"""
@@ -99,6 +105,63 @@ class TestHistoryIndexer(unittest.TestCase):
 
         self.assertEqual(len(results_none), 1)
         self.assertIn("未找到匹配的记录", results_none[0])
+
+        # 6. 通用服务接口
+        service = get_history_search_service()
+        self.assertIsNotNone(service)
+        service = cast(HistorySearchService, service)
+        session_records = await service.search_by_session("session1", "hello", limit=5)
+        self.assertEqual(len(session_records), 2)
+        platform_records = await service.search_by_platform(
+            ["test_platform"], "hello", 5
+        )
+        self.assertEqual(len(platform_records), 2)
+        sender_records = await service.search_by_sender("user2", "another", limit=5)
+        self.assertEqual(len(sender_records), 1)
+
+        # 7. 新增检索指令
+        platform_msgs = []
+        async for result in self.indexer.hist_platform(
+            mock_search_event,
+            platform="test_platform",
+            keyword="hello",
+            limit=5,
+        ):
+            platform_msgs.append(result.get_message())
+        self.assertTrue(platform_msgs)
+        self.assertIn("平台 test_platform", platform_msgs[0])
+
+        session_msgs = []
+        async for result in self.indexer.hist_session(
+            mock_search_event,
+            session="session1",
+            keyword="hello",
+            limit=5,
+        ):
+            session_msgs.append(result.get_message())
+        self.assertTrue(session_msgs)
+        self.assertIn("会话 session1", session_msgs[0])
+
+        global_msgs = []
+        async for result in self.indexer.hist_global(
+            mock_search_event,
+            keyword="world",
+            limit=5,
+        ):
+            global_msgs.append(result.get_message())
+        self.assertTrue(global_msgs)
+        self.assertIn("全局最近", global_msgs[0])
+
+        sender_msgs = []
+        async for result in self.indexer.hist_sender(
+            mock_search_event,
+            sender="user1",
+            keyword="hello",
+            limit=5,
+        ):
+            sender_msgs.append(result.get_message())
+        self.assertTrue(sender_msgs)
+        self.assertIn("user1", sender_msgs[0])
 
         # 5. 终止
         await self.indexer.terminate()
