@@ -7,8 +7,9 @@
 - **静默运行**: 作为一个后台服务，它不提供任何用户可直接交互的聊天命令。
 - **消息持久化**: 监听所有通过 AstrBot 的消息事件，并将其关键信息 (如发送者、内容、时间等) 持久化到本地的 SQLite 数据库中。
 - **提供检索接口**: 通过 `HistorySearchService` 类，为其他需要历史消息的插件提供一个稳定、高效的异步检索接口。
+- **默认模糊搜索**: 所有检索 API 都会先做一次粗筛选，再通过 `thefuzz.partial_ratio`（或内建的兜底算法）计算相似度，只有得分达到阈值的记录才会返回，默认阈值为 70 分。
 
-数据库文件默认存储于 `data/activity_history_index.db`，以确保数据在插件更新后得以保留。
+数据库文件默认存储于 `data/activity_history_index.db`，以确保数据在插件更新后得以保留。该文件会在插件初始化成功后（即 AstrBot 启动并载入插件时）自动创建。
 
 ## 如何为你的插件集成历史检索能力
 
@@ -23,7 +24,7 @@
     在你的插件代码中，从本插件导入 `get_history_search_service` 函数。
 
     ```python
-    from astrbot_plugin_history_indexer.main import get_history_search_service
+    from astrbot_plugin_history_indexer import get_history_search_service
     ```
 
 3.  **获取服务实例并使用**:
@@ -74,4 +75,10 @@
 - `search_by_sender(sender_id, keyword, platform_id, limit)`: 按发送者检索，可选平台限制。
 - `search_global(keyword, limit)`: 全局检索。
 
-详细的参数说明请参考 `main.py` 中 `HistorySearchService` 类的文档字符串。
+详细的参数说明请参考 `main.py` 中 `HistorySearchService` 类的文档字符串。所有方法都接受 `fuzzy_threshold` 参数（默认 70），用于控制模糊匹配的灵敏度——数字越大越严格。
+
+## 常见问题
+
+- **没有生成 `activity_history_index.db`？**
+  - 请确认 AstrBot 的插件管理器在启动时已经成功载入 `astrbot_plugin_history_indexer`。只有在插件初始化过程中才会调用 `_init_db` 创建数据库。
+  - 如果日志中出现 `ModuleNotFoundError` 或 `IndexError: list index out of range`，说明插件尚未正确注册或导入，初始化被中断，因此也就没有机会创建数据库文件。修复导入/注册问题后重新加载插件即可自动生成数据库。
